@@ -1,0 +1,8 @@
+prefix=/home/haojun/Desktop/pera/devel
+
+Name: pera_control
+Description: Description of pera_control
+Version: 0.10.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

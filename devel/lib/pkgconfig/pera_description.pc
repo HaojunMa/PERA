@@ -1,0 +1,8 @@
+prefix=/home/haojun/Desktop/pera/devel
+
+Name: pera_description
+Description: Description of pera_description
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: message_runtime

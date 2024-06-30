@@ -1,0 +1,28 @@
+<package>
+  <name>pera_control</name>
+  <version>0.10.0</version>
+  <description>
+    Controllers for PERA, based upon arbotix_python packege
+  </description>
+  <author>Sietse Achterop</author>
+  <maintainer email="s.achterop@rug.nl">Sietse Achterop</maintainer>
+  <license>BSD</license>
+  <url>http://notyet</url>
+  
+  <buildtool_depend>catkin</buildtool_depend>
+
+
+
+  <run_depend>rospy</run_depend>
+  <run_depend>tf</run_depend>
+  <run_depend>sensor_msgs</run_depend>
+  <run_depend>geometry_msgs</run_depend>
+  <run_depend>diagnostic_msgs</run_depend>
+  <run_depend>control_msgs</run_depend>
+  <run_depend>nav_msgs</run_depend>
+  <run_depend>actionlib</run_depend>
+
+
+</package>
+
+

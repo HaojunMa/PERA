@@ -1,0 +1,203 @@
+#!/usr/bin/env python
+"""
+  Main driver for PERA
+"""
+
+# from pera_control.src.pera_control.pera_controller_velpid import parallel
+import rospy
+import sys
+import csv
+import matplotlib.pyplot as plt
+import time 
+import fcntl
+import numpy as np
+import serial.tools.list_ports
+
+from datetime import datetime
+from urdf_parser_py.urdf import URDF
+
+from pera_control.pera_controller_velpid import *
+
+from rtm_usb import *
+
+class PERA():
+    
+    def __init__(self):
+        pause = False
+
+        # load configurations    
+        self.rate = rospy.get_param("~rate", 50.0)          #Originally 50
+        self.fake = rospy.get_param("~sim", False)
+        # evt. een fake per board voor testen
+        self.motors = rospy.get_param("~motors", True)
+        # only used in the main loop
+
+        # for outputting time
+        self.t0 = 0.0
+        self.t_flg = 0
+
+        # Initialize rtm_boards
+        if not self.fake:
+            rospy.on_shutdown(h)
+            try:
+                RTM2v_Init()
+            except:
+                rospy.loginfo("No RTM device found, ending program.")
+                return
+            rospy.loginfo("initialized rtm boards.")
+        else:
+            rospy.loginfo("PERA being simulated.")
+
+        # get info from configuration
+        robot = URDF.from_parameter_server()
+        self.URDFjoints = robot.joints
+        self.joints = rospy.get_param("~joints", dict())
+
+        # local names for performance in the main loop
+        Wrist_Board = Wristcontroller(self,3)        
+        # S3Gripper_Board = S3Grippercontroller(self, 2)
+        Km = np.array([[50.0], [50.0], [50.0]])
+        Dm = np.array([[3000.0], [3000.0], [3000.0]])
+        Md = np.array([[ 0.01], [0.01], [0.01]])
+        Kf = np.array([[ 0.01], [0.01], [0.005]])
+        KI = np.diag([0.01, 0.01, 0.01])
+        Fd = np.array([[0.0], [1.0], [0.0]])  # Contact force along y-axis of base frame 
+        qd = np.array([[0.0], [0.0]])         # Desired position in joint-space
+        PERA_controller = parallel(Km, Dm, Md, Kf, qd, Fd) 
+        
+        # to get proper type for Enc
+        Enc = np.zeros(2, dtype='int32') 
+        
+        cnt = 0  # for monitoring time
+        time_data = []
+        positionWP, velocityWP = [], []
+        positionWY, velocityWY = [], [] 
+
+        tauWP_data, tauWY_data = [], []
+        uW0_data, uW1_data = [], []
+
+        F_data = []
+	
+        # prepare main loop
+        r = rospy.Rate(self.rate)
+        oldt = rospy.Time.now() 
+        #r.sleep()
+
+        ports = serial.tools.list_ports.comports()
+        serialInst = serial.Serial()
+        serialInst.baudrate = 57600
+        serialInst.port = '/dev/ttyACM0'
+        serialInst.open()
+        serialInst.flushInput()
+        for i in range(30):
+            packet = serialInst.readline()
+
+        while not rospy.is_shutdown():
+            # check jitter and prevent overrun
+            newt = rospy.Time.now() 
+            delta = newt - oldt  # werkt dit met sec/nsec?
+            oldt = newt
+            
+            if not self.fake:
+                DevNr = 3 # Wrist board ########
+                _, ADC3, Enc = rtm_usb_ReadStdMsg(DevNr)  # The gripper force readout(ADC[6]) drifts with time
+                encW0, encW1 = float(Enc[0]), float(Enc[1])
+            
+            posW0, velW0, posW1, velW1 = Wrist_Board.read_enc(encW0, encW1, delta)
+
+            if cnt < 3:
+                # First 3 second is used to clear the Arduino output
+                packet = serialInst.readline()
+                tauWP,tauWY = 0, 0 # used for reading position
+            else:
+                packet = serialInst.readline()
+                output = packet.decode('utf').rstrip('\n')
+                output = float(output)
+                fe = 9.8*output*0.001
+            
+            Fe = np.array([[0.0],[fe],[0.0]])
+            tauWP,tauWY = PERA_controller.parallelControlPH(posW0,velW0,posW1,velW1,Fe,delta)
+            # tauWP,tauWY = PERA_controller.parallelControlEL(posW0,velW0,posW1,velW1,Fe,KI,delta)
+            # tauWP,tauWY = PERA_controller.ImpedancePH(posW0,velW0,posW1,velW1,Fe)
+            # tauWP,tauWY = 0, 0 # used for reading position
+
+            uW0,uW1 = Wrist_Board.step(tauWP,tauWY)
+
+            if not self.motors:
+                uW0=0;uW1=0
+
+            if not self.fake:
+                DevNr = 3
+                rtm_usb_SendStdMsg(DevNr,0,uW0,uW1,0)
+
+            # hoe veel tijd kost dit? (minimaal 2.3 millisec)
+            delta = delta.to_sec()
+            cnt =cnt
+            #if delta > 20.3 or elapsed > 3.2:
+            #   print 'Tijd: %d    %.1f   %.1f' % (cnt, elapsed, delta)
+            #  cnt = 0
+
+            print('====================================')
+            print('time  = '+str(cnt))
+            print('tauWP = '+str(tauWP))
+            print('tauWY = '+str(tauWY))
+            print('uW0 = '+str(uW0))
+            print('uW1 = '+str(uW1))
+            print('posWP = '+str(posW0))
+            print('posWY = '+str(posW1))
+            print('Force is: '+str(fe)+'N')
+            print('====================================')
+            cnt = cnt+delta
+            positionWP.append(posW0)
+            velocityWP.append(velW0)
+            positionWY.append(posW1)
+            velocityWY.append(velW1)
+            tauWP_data.append(tauWP)
+            tauWY_data.append(tauWY)
+            uW0_data.append(uW0)
+            uW1_data.append(uW1)
+            time_data.append(cnt)
+            F_data.append(fe)
+
+            r.sleep()
+        
+        #Create data when loops is finished
+        fields=["time","posWP","posWY","velWP","velWY","tau0","tau1","uW0","uW1","Fe"]
+        rows=[time_data,positionWP,positionWY,velocityWP,velocityWY,tauWP_data,tauWY_data,uW0_data,uW1_data,F_data]	
+        rows=list(zip(*rows))
+        filename=datetime.now().strftime("dataset.csv")	
+        with open('/home/haojun/Desktop/pera/'+filename, 'w') as f:
+            write=csv.writer(f)
+            write.writerow(fields)
+            write.writerows(rows)#    for key in data_set.keys():
+        #	f.write("%s, %s\n" % (key,data_set[key]))
+        # do shutdown
+        #input("Press something to exit")
+        Wrist_Board.shutdown()
+        serialInst.close()
+
+        # Plotting
+        plt.figure()
+        plt.title("Wrist Pitch")	
+        plt.plot(time_data, positionWP)
+        plt.figure()
+        plt.title("Wrist Yaw")
+        plt.plot(time_data, positionWY)
+        plt.figure()
+        plt.title("Control Torque Pitch")        
+        plt.plot(time_data, tauWP_data)
+        plt.figure()
+        plt.title("Control Torque Yaw")        
+        plt.plot(time_data, tauWY_data)
+        plt.show()      
+
+def h():
+    print "shutdown time!"
+    if not rospy.get_param("~sim", False):     # hopefully the parameter server is still running
+        for DevNr in range(4):
+            rtm_usb_SendStdMsg(DevNr,0, 0, 0, 0);
+
+if __name__ == "__main__":
+    rospy.init_node('pera')
+    a = PERA()
+

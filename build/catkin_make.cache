@@ -1,0 +1,2 @@
+pera/pera_bringup:pera/pera_control:pera/pera_description
+-DCATKIN_DEVEL_PREFIX=/home/haojun/Desktop/pera/devel -DCMAKE_INSTALL_PREFIX=/home/haojun/Desktop/pera/install -G Unix Makefiles

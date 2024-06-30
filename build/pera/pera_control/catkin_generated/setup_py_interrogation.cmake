@@ -1,0 +1,6 @@
+set(pera_control_SETUP_PY_VERSION "0.10.0")
+set(pera_control_SETUP_PY_SCRIPTS "bin/pera_gui")
+set(pera_control_SETUP_PY_PACKAGES "pera_control")
+set(pera_control_SETUP_PY_PACKAGE_DIRS "src/pera_control")
+set(pera_control_SETUP_PY_MODULES "")
+set(pera_control_SETUP_PY_MODULE_DIRS "")

@@ -1,0 +1,99 @@
+# PERA configuration
+
+rate: 100
+# evt joint publishing op een n keer lagere rate 
+
+# Beware: do NOT change order of joints here!
+#   names shoulder different (and wrong?) from manual!
+#           yaw (S1), pitch (S2), roll (S3)
+joints: {
+   shoulder_yaw_joint: { inuse: true,
+                               devnr: 0,
+                               channel: 0,
+                               type: pid1,
+                               P: 4,
+                               I: 0,
+                               D: 0.5
+                             },
+
+   shoulder_pitch_joint: { inuse: true,
+                                 devnr: 0,
+                                 channel: 1,
+                                 type: pid1,
+                                 P: 4,
+                                 I: 0,
+                                 D: 0.5
+                               },
+
+   elbow_pitch_joint: { inuse: true,
+                              devnr: 1,
+                              channel: 0,
+                              type: pid1,
+                              P: 10,
+                              I: 0,
+                              D: 1.0
+                            },
+
+   elbow_roll_joint: { inuse: true,
+                             devnr: 1,
+                             channel: 1,
+                             type: pid1,
+                             P: 10,
+                             I: 0,
+                             D: 1.0
+                           },
+
+   shoulder_roll_joint: { inuse: true,
+                                devnr: 2,
+                                channel: 0,
+                                type: pid1,
+                                P: 40,
+                                I: 0,
+                                D: 0.5
+                              },
+
+   gripper_joint: { inuse: true,
+                    devnr: 2,
+                    channel: 1,
+                    type: pid1,
+                    P: 30,
+                    I: 0,
+                    D: 0
+                  },
+
+   wrist_pitch_joint: { inuse: true,
+                               devnr: 3,
+                               channel: 0,
+                               type: pid1,
+                               P: 10,
+                               I: 0,
+                               D: 0.8
+                             },
+
+   wrist_yaw_joint: { inuse: true,
+                            devnr: 3,
+                            channel: 1,
+                            type: pid1,
+                            P: 10,
+                            I: 0,
+                            D: 0.8
+        }
+}
+
+controllers: {
+   arm_controller: {onboard: False,
+                    action_name: arm_controller/follow_joint_trajectory,
+                    type: follow_controller,
+                    joints: [ shoulder_yaw_joint,
+                              shoulder_pitch_joint,
+                              shoulder_roll_joint,
+                              elbow_pitch_joint,
+                              elbow_roll_joint,
+                              wrist_pitch_joint,
+                              wrist_yaw_joint ]},
+   gripper_controller:  { onboard: False,
+                          action_name: gripper_controller/follow_joint_trajectory,
+                          type: follow_controller,
+                          model: dualservo,
+                          joints: [ gripper_joint ]}
+}

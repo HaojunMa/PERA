@@ -1,0 +1,16 @@
+digraph G {
+"upper_arm" -> "elbow_link4"[label="Broadcaster: /robot_state_publisher\nAverage rate: 12.040 Hz\nMost recent transform: 1462269402.436 ( 0.094 sec old)\nBuffer length: 4.900 sec\n"];
+"shoulder_link2" -> "upper_arm"[label="Broadcaster: /robot_state_publisher\nAverage rate: 12.040 Hz\nMost recent transform: 1462269402.436 ( 0.094 sec old)\nBuffer length: 4.900 sec\n"];
+"elbow_link4" -> "fore_arm"[label="Broadcaster: /robot_state_publisher\nAverage rate: 12.040 Hz\nMost recent transform: 1462269402.436 ( 0.094 sec old)\nBuffer length: 4.900 sec\n"];
+"hand" -> "gripper"[label="Broadcaster: /robot_state_publisher\nAverage rate: 12.040 Hz\nMost recent transform: 1462269402.436 ( 0.094 sec old)\nBuffer length: 4.900 sec\n"];
+"wrist_link6" -> "hand"[label="Broadcaster: /robot_state_publisher\nAverage rate: 12.040 Hz\nMost recent transform: 1462269402.436 ( 0.094 sec old)\nBuffer length: 4.900 sec\n"];
+"shoulder_link1" -> "shoulder_link2"[label="Broadcaster: /robot_state_publisher\nAverage rate: 12.040 Hz\nMost recent transform: 1462269402.436 ( 0.094 sec old)\nBuffer length: 4.900 sec\n"];
+"shoulder_mount" -> "shoulder_link1"[label="Broadcaster: /robot_state_publisher\nAverage rate: 12.040 Hz\nMost recent transform: 1462269402.436 ( 0.094 sec old)\nBuffer length: 4.900 sec\n"];
+"world" -> "shoulder_mount"[label="Broadcaster: /robot_state_publisher\nAverage rate: 20.203 Hz\nMost recent transform: 1462269402.490 ( 0.040 sec old)\nBuffer length: 4.950 sec\n"];
+"fore_arm" -> "wrist_link6"[label="Broadcaster: /robot_state_publisher\nAverage rate: 12.040 Hz\nMost recent transform: 1462269402.436 ( 0.094 sec old)\nBuffer length: 4.900 sec\n"];
+"world" -> "camera_link"[label="Broadcaster: /robot_state_publisher\nAverage rate: 20.203 Hz\nMost recent transform: 1462269402.490 ( 0.040 sec old)\nBuffer length: 4.950 sec\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1462269402.529"[ shape=plaintext ] ;
+ }->"world";
+}

@@ -1,0 +1,1114 @@
+#!/usr/bin/env python
+
+"""
+   Controllers for pera
+"""
+from __future__ import division
+import rospy
+
+import numpy as np
+from math import radians, pi
+
+from std_msgs.msg import Float64
+from diagnostic_msgs.msg import *
+from sensor_msgs.msg import RegionOfInterest, CameraInfo
+import thread
+
+from urdf_parser_py.urdf import URDF
+from boards import *
+from myexception import *
+
+from rtm_usb import *
+
+from initencoders import *
+
+# Three controllers are almost same.
+# The main differences include the physical parameters, the PID gains,
+# and the joint structure (with/without the differential drive).
+# However, they could be written in more compact form by using "inheritance",
+# one of functionality in object-oriented programming.
+
+# template for the controller function proper
+class PIDfunction():
+    """
+       PID function with parameters set
+       inputs in radians
+       output klaar voor de DAC
+    """
+    def __init__(self, P,I,D):
+        print 'set pid variables'
+
+    def output():
+        return 0,0
+
+
+#############################################
+class S12controller(Board):
+    """
+       controller for S12 joints with differential drive
+                      (= shoulder_{yaw,pitch}_joint)
+         which contains all state of the board
+    """
+    def __init__(self, device, DevNr):
+        Board.__init__(self, device)
+        self.fake = device.fake
+        self.rate = device.rate
+        self.DevNr = DevNr
+
+        # parameters voor dit board ophalen
+        # these are all constants
+        joints = device.joints
+        for x in joints:
+            if joints[x].get('devnr') == DevNr:
+                channr =  joints[x].get('channel')
+                if channr == 0:
+                    self.name0 = x
+                    self.P0 = joints[x].get('P')
+                    self.I0 = joints[x].get('I')
+                    self.D0 = joints[x].get('D')
+                    self.lower0 = joints[x].get('lower')
+                    self.upper0 = joints[x].get('upper')
+                    self.controller0 = joints[x].get('controller')
+                else:
+                    self.name1 = x
+                    self.P1 = joints[x].get('P')
+                    self.I1 = joints[x].get('I')
+                    self.D1 = joints[x].get('D')
+                    self.lower1 = joints[x].get('lower')
+                    self.upper1 = joints[x].get('upper')
+                    self.controller1 = joints[x].get('controller')
+
+        # de bij getEnc gevonden waarde gebruiken
+        self.prev_pos0   = 0     # previous position
+        self.prev_error0 = 0.0   # previous error
+        self.setpos0     = 0     # setpoint
+        self.int0        = 0     # I part of PID
+        self.max_speed0  = 2.1   # max speed. Only used in fake mode
+
+        self.prev_pos1   = 0     # previous position
+        self.prev_error1 = 0.0   # previous error
+        self.setpos1     = 0     # setpoint
+        self.int1        = 0     # I part of PID
+        self.max_speed1  = 2.1   # max speed. Only used in fake mode
+
+        self.last = rospy.Time.now()
+
+        # ROS interfaces
+        rospy.Subscriber(self.name0+'/position/command', Float64, self.command0Cb)
+        rospy.Subscriber(self.name1+'/position/command', Float64, self.command1Cb)
+
+        # trail run (first one is slow)
+        if not self.fake:
+            try:
+                rtm_usb_ReadStdMsg(DevNr)
+                rtm_usb_Read_ready(DevNr)
+                rtm_usb_SendStdMsg(DevNr,0, 0, 0, 0)
+            except MyError as e:
+                print 'Trail run exception occurred, value:', e.value
+
+            # Get the encoder offsets for encoder X and Y 
+            self.offset_1, self.offset_2, self.prev_pos0, self.prev_pos1 = getEncOffset_RsPs(DevNr)
+            self.setpos0 = self.prev_pos0
+            self.setpos1 = self.prev_pos1
+        # for check
+        print '----------------------------- init. info. (begin) -----------------------------'
+        print '*Shoulder joint (yaw)'
+        self.showParam(self.prev_pos0, self.offset_1 if not self.fake else 0,
+                       self.lower0,self.upper0, self.P0,self.I0,self.D0,self.controller0)
+        print '*Shoulder joint (pitch)'
+        self.showParam(self.prev_pos1, self.offset_2 if not self.fake else 0,
+                       self.lower1,self.upper1, self.P1,self.I1,self.D1,self.controller1)
+        
+    def showParam(self, prev_pos,offset, lower,upper, P,I,D,contr):
+        print '    enc: (angle (rad), offset) = (%.4f, %.1f)' % (prev_pos, offset)
+        print '    joint range of motion: [%.2f, %.2f] (rad)' % (lower, upper)
+        print '    contr. param: (P, I, D,  contr) = (%.1f, %.1f, %.1f,  %s)' % (P, I, D, contr)
+
+    def shutdown(self):
+        if not self.fake:
+            rtm_usb_SendStdMsg(self.DevNr,0, 0, 0, 0);
+        return None
+
+    def saturator(self, val, lower, upper):
+        return lower if val<lower else upper if val>upper else val
+        # which means ...
+        # if val > upper:
+        #     return upper
+        # elif val < lower:
+        #     return lower
+        # else:
+        #     return val
+        
+    def getPosition(self):
+        return [ (self.name0, self.prev_pos0), (self.name1, self.prev_pos1) ]
+
+    def setPosition0(self, pos):
+        self.setpos0 = self.saturator(pos, self.lower0,self.upper0)
+    def setPosition1(self, pos):
+        self.setpos1 = self.saturator(pos, self.lower1,self.upper1)
+
+    def command0Cb(self, req):
+        # set self.setpos0
+        if self.controller0 and self.controller0.active():
+            # Under and action control, do not interfere
+            return
+        elif self.setpos0 != req.data:     #or not self.active:
+            self.setPosition0(req.data)
+    def command1Cb(self, req):
+        # set self.setpos1
+        if self.controller1 and self.controller1.active():
+            # Under and action control, do not interfere
+            return
+        elif self.setpos1 != req.data:     #or not self.active:
+            self.setPosition1(req.data)
+
+    def step(self, enc0, enc1):
+
+        if not self.fake:
+            # moet dit voor ieder board weer omnieuw?
+            now = rospy.Time.now()
+            elapsed = now - self.last
+            elapsed = elapsed.to_sec()
+            self.last = now
+
+            # taken from testwrist.py
+            #  Set the encoders to zero, offset is generated from the hall effect sensors
+            EncWX = enc0 + self.offset_1
+            EncWY = enc1 + self.offset_2
+    
+            # in terms of the joints
+            EncTheta1 = 0.5*(EncWX + EncWY)
+            EncTheta2 = 0.5*(EncWY - EncWX)
+
+            #  Convert encoder to angle in degrees (board specific)
+            EncTheta1 = EncTheta1 * 0.000645
+            EncTheta2 = EncTheta2 * 0.000645
+            # no limiting
+
+            #  pos0 en pos1 in radians (later direct)
+            pos0 = EncTheta1*pi/180
+            pos1 = EncTheta2*pi/180
+
+            error0 =   self.setpos0 - pos0
+            error1 = -(self.setpos1 - pos1)     # note the minus sign
+
+            self.int0 += error0*elapsed
+            self.int1 += error1*elapsed
+            dterm0 =  (error0 - self.prev_error0)/elapsed
+            dterm1 =  (error1 - self.prev_error1)/elapsed
+
+            vel0 = (pos0 - self.prev_pos0)/elapsed
+            vel1 = (pos1 - self.prev_pos1)/elapsed
+
+            self.prev_pos0 = pos0
+            self.prev_pos1 = pos1
+            self.prev_error0 = error0
+            self.prev_error1 = error1
+
+            # calculatie the tau's using PID for the moment
+
+            tau0 = self.P0*error0 + self.I0*self.int0 + self.D0*dterm0
+            tau1 = self.P1*error1 + self.I1*self.int1 + self.D1*dterm1
+
+            # convert back to the 2 motors (ik snap de factor 2 niet!)
+            taumotor0 = (tau0 + tau1)/2
+            taumotor1 = (tau0 - tau1)/2
+
+            # Motor specifications (for S12)        Shoulder  Elbow  Wrist
+            kM  = 53.8   # Torque Constant [nMn/A]:    53.8   23.2   21.2
+            G   = 66     # Gear Ratio             :    66     33     29  
+            eff =  0.70  # Max Eff of the Gear [%]:     0.70   0.75   0.70
+
+            # The calculated torque needs to be compensated for the efficiency of the gearing
+            torquem0 = taumotor0/(G*eff)
+            torquem1 = taumotor1/(G*eff)
+
+            # The current in mA is related to the number of counts in the output
+            # I(A)=torque(mNm)/km(mNm/A). We need I(mA) and have torque(Nm), so
+            # I(mA)=torque(Nm)*1000*1000/km(mNm/A)
+            i0 = torquem0*1000*1000/kM/4.3
+            i1 = torquem1*1000*1000/kM/4.3
+            # no compensation for non-linear amplifier. See testwrist.py
+            u0 = 30*i0
+            u1 = 30*i1
+            # Define a limit for the reference signal to protect the motors
+            u0_upper = 16000
+            u0 = self.saturator(u0, -u0_upper,u0_upper)
+            u1_upper = 16000
+            u1 = self.saturator(u1, -u1_upper,u1_upper)
+
+            # at which point should we put this? (waarschijnlijk in driver)
+            rtm_usb_Read_ready(self.DevNr)
+            
+            # How much time does it cost? (approximately 0.5 ms)
+            #now = rospy.Time.now()
+            #dt = now - last
+            #dt = dt.to_sec()
+            #print 'Tijd: %.1f' % (dt*1000)
+
+            return pos0, vel0, u0, pos1, vel1, u1
+
+        else:
+            # fake stuff
+            # bereken de nieuwe position en snelheid
+            # gebruik een max speed, voorlopig alleen in fake mode
+            t = rospy.Time.now()
+
+            # channel 0
+            # apply limits to position
+            cmd = self.setpos0 - self.prev_pos0
+            cmd_upper = self.max_speed0/self.rate
+            cmd = self.saturator(cmd, -cmd_upper,cmd_upper)
+            # new position
+            pos0 = self.prev_pos0 + cmd
+            # new speed
+            vel0 = (pos0 - self.prev_pos0)/((t - self.last).to_nsec()/1000000000.0)
+            self.prev_pos0 = pos0
+
+            # channel 1
+            # apply limits to position
+            cmd = self.setpos1 - self.prev_pos1
+            cmd_upper = self.max_speed1/self.rate
+            cmd = self.saturator(cmd, -cmd_upper,cmd_upper)
+            # new position
+            pos1 = self.prev_pos1 + cmd
+            # new speed
+            vel1 = (pos1 - self.prev_pos1)/((t - self.last).to_nsec()/1000000000.0)
+            self.prev_pos1 = pos1
+
+            self.last = t
+
+            return pos0, vel0, 0, pos1, vel1, 0
+
+
+class Elbowcontroller(Board):
+    """
+       controller for elbow joints with differential drive
+                      (= elbow_{pitch,roll}_joint)
+    """
+    def __init__(self, device, DevNr):
+        self.fake = device.fake
+        self.rate = device.rate
+        self.DevNr = DevNr
+
+        # parameters voor dit board ophalen
+        # these are all constants
+        joints = device.joints
+        for x in joints:
+            if joints[x].get('devnr') == DevNr:
+                channr =  joints[x].get('channel')
+                if channr == 0:
+                    self.name0 = x
+                    self.P0 = joints[x].get('P')
+                    self.I0 = joints[x].get('I')
+                    self.D0 = joints[x].get('D')
+                    self.lower0 = joints[x].get('lower')
+                    self.upper0 = joints[x].get('upper')
+                    self.controller0 = joints[x].get('controller')
+                else:
+                    self.name1 = x
+                    self.P1 = joints[x].get('P')
+                    self.I1 = joints[x].get('I')
+                    self.D1 = joints[x].get('D')
+                    self.lower1 = joints[x].get('lower')
+                    self.upper1 = joints[x].get('upper')
+                    self.controller1 = joints[x].get('controller')
+
+        # de bij getEnc gevonden waarde gebruiken
+        self.prev_pos0   = 0     # previous position
+        self.prev_error0 = 0.0   # previous error
+        self.setpos0     = 0     # setpoint
+        self.int0        = 0     # I part of PID
+        self.max_speed0  = 2.1   # max speed. Only used in fake mode
+
+        self.prev_pos1   = 0     # previous position
+        self.prev_error1 = 0.0   # previous error
+        self.setpos1     = 0     # setpoint
+        self.int1        = 0     # I part of PID
+        self.max_speed1  = 2.1   # max speed. Only used in fake mode
+
+        self.last = rospy.Time.now()
+
+        # ROS interfaces
+        rospy.Subscriber(self.name0+'/position/command', Float64, self.command0Cb)
+        rospy.Subscriber(self.name1+'/position/command', Float64, self.command1Cb)
+
+        # trail run (first one is slow)
+        if not self.fake:
+            try:
+                rtm_usb_ReadStdMsg(DevNr)
+                rtm_usb_Read_ready(DevNr)
+                rtm_usb_SendStdMsg(DevNr,0, 0, 0, 0)
+            except MyError as e:
+                print 'Trail run exception occurred, value:', e.value
+
+            # Get the encoder offsets for encoder X and Y 
+            self.offset_1, self.offset_2,self.prev_pos0, self.prev_pos1 = getEncOffset_PeYe(DevNr)
+            self.setpos0 = self.prev_pos0
+            self.setpos1 = self.prev_pos1
+        # for check
+        print '*Elbow joint (pitch)'
+        self.showParam(self.prev_pos0, self.offset_1 if not self.fake else 0,
+                       self.lower0,self.upper0, self.P0,self.I0,self.D0,self.controller0)
+        print '*Elbow joint (roll)'
+        self.showParam(self.prev_pos1, self.offset_2 if not self.fake else 0,
+                       self.lower1,self.upper1, self.P1,self.I1,self.D1,self.controller1)
+
+    def showParam(self, prev_pos,offset, lower,upper, P,I,D,contr):
+        print '    enc: (angle (rad), offset) = (%.4f, %.1f)' % (prev_pos, offset)
+        print '    joint range of motion: [%.2f, %.2f] (rad)' % (lower, upper)
+        print '    contr. param: (P, I, D,  contr) = (%.1f, %.1f, %.1f,  %s)' % (P, I, D, contr)
+
+    def shutdown(self):
+        if not self.fake:
+            rtm_usb_SendStdMsg(self.DevNr,0, 0, 0, 0);
+        return None
+
+    def saturator(self, val, lower, upper):
+        return lower if val<lower else upper if val>upper else val
+
+    def getPosition(self):
+        return [ (self.name0, self.prev_pos0), (self.name1, self.prev_pos1) ]
+
+    def setPosition0(self, pos):
+        self.setpos0 = self.saturator(pos, self.lower0,self.upper0)
+    def setPosition1(self, pos):
+        self.setpos1 = self.saturator(pos, self.lower1,self.upper1)
+
+    def command0Cb(self, req):
+        # set self.setpos0
+        if self.controller0 and self.controller0.active():
+            # Under and action control, do not interfere
+            return
+        elif self.setpos0 != req.data:     #or not self.active:
+            self.setPosition0(req.data)
+    def command1Cb(self, req):
+        # set self.setpos1
+        if self.controller1 and self.controller1.active():
+            # Under and action control, do not interfere
+            return
+        elif self.setpos1 != req.data:     #or not self.active:
+            self.setPosition1(req.data)
+
+    def step(self, enc0, enc1):
+
+        if not self.fake:
+            # moet dit voor ieder board weer omnieuw?
+            now = rospy.Time.now()
+            # dt: elapsed time
+            dt = now - self.last
+            dt = dt.to_sec()
+            self.last = now
+
+            # taken from testwrist.py
+            #  Set the encoders to zero, offset is generated from the hall effect sensors
+            EncWX = enc0 + self.offset_1
+            EncWY = enc1 + self.offset_2
+    
+            # in terms of the joints
+            EncTheta1 = 0.5*(EncWX + EncWY)
+            EncTheta2 = 0.5*(EncWY - EncWX)
+
+            #  Convert encoder to angle in degrees (board specific)
+            EncTheta1 = EncTheta1 * (4.53855424*10**-4)
+            EncTheta2 = EncTheta2 * (4.38427091*10**-4)
+            # no limiting
+
+            #  pos0 en pos1 in radians (later direct)
+            pos0 = EncTheta1*pi/180
+            pos1 = EncTheta2*pi/180
+
+            error0 =   self.setpos0 - pos0
+            error1 = -(self.setpos1 - pos1)    # note the minus sign
+
+            self.int0 += error0*dt
+            self.int1 += error1*dt
+            dterm0 =  (error0 - self.prev_error0)/dt
+            dterm1 =  (error1 - self.prev_error1)/dt
+
+            vel0 = (pos0 - self.prev_pos0)/dt
+            vel1 = (pos1 - self.prev_pos1)/dt
+
+            self.prev_pos0 = pos0
+            self.prev_pos1 = pos1
+            self.prev_error0 = error0
+            self.prev_error1 = error1
+
+            # calculatie the tau's using PID for the moment
+
+            tau0 = self.P0*error0 + self.I0*self.int0 + self.D0*dterm0
+            tau1 = self.P1*error1 + self.I1*self.int1 + self.D1*dterm1
+
+            # convert back to the 2 motors (ik snap de factor 2 niet!)
+            taumotor0 = (tau0 + tau1)/2
+            taumotor1 = (tau0 - tau1)/2
+
+            # Motor specifications (for Elbow)      Shoulder  Elbow  Wrist
+            kM  = 23.2   # Torque Constant [nMn/A]:    53.8   23.2   21.2
+            G   = 33     # Gear Ratio             :    66     33     29  
+            eff =  0.75  # Max Eff of the Gear [%]:     0.70   0.75   0.70
+
+            # The calculated torque needs to be compensated for the efficiency of the gearing
+            torquem0 = taumotor0/(G*eff)
+            torquem1 = taumotor1/(G*eff)
+
+            # The current in mA is related to the number of counts in the output
+            # I(A)=torque(mNm)/km(mNm/A). We need I(mA) and have torque(Nm), so
+            # I(mA)=torque(Nm)*1000*1000/km(mNm/A)
+            i0 = torquem0*1000*1000/kM/4.3
+            i1 = torquem1*1000*1000/kM/4.3
+            # no compensation for non-linear amplifier. See testwrist.py
+            u0 = 10*i0
+            u1 = 10*i1
+            # Define a limit for the reference signal to protect the motors
+            u0_upper = 16000
+            u0 = self.saturator(u0, -u0_upper,u0_upper)
+            u1_upper = 16000
+            u1 = self.saturator(u1, -u1_upper,u1_upper)
+
+            # at which point should we put this? (waarschijnlijk in driver)
+            rtm_usb_Read_ready(self.DevNr)
+            
+            return pos0, vel0, u0, pos1, vel1, u1
+
+        else:
+            # fake stuff
+            # bereken de nieuwe position en snelheid
+            # gebruik een max speed, voorlopig alleen in fake mode
+            t = rospy.Time.now()
+
+            # channel 0
+            # apply limits to position
+            cmd = self.setpos0 - self.prev_pos0
+            cmd_upper = self.max_speed0/self.rate
+            cmd = self.saturator(cmd, -cmd_upper,cmd_upper)
+            # new position
+            pos0 = self.prev_pos0 + cmd
+            # new speed
+            vel0 = (pos0 - self.prev_pos0)/((t - self.last).to_nsec()/1000000000.0)
+            self.prev_pos0 = pos0
+
+            # channel 1
+            # apply limits to position
+            cmd = self.setpos1 - self.prev_pos1
+            cmd_upper = self.max_speed1/self.rate
+            cmd = self.saturator(cmd, -cmd_upper,cmd_upper)
+            # new position
+            pos1 = self.prev_pos1 + cmd
+            # new speed
+            vel1 = (pos1 - self.prev_pos1)/((t - self.last).to_nsec()/1000000000.0)
+            self.prev_pos1 = pos1
+
+            self.last = t
+
+            return pos0, vel0, 0, pos1, vel1, 0
+
+
+class S3Grippercontroller(Board):
+    """
+       controller for S3 and gripper joints
+                      (= shoulder_roll_joint, gripper_joint)
+    """
+    def __init__(self, device, DevNr):
+        self.fake = device.fake
+        self.rate = device.rate
+        self.DevNr = DevNr
+
+        # parameters voor dit board ophalen
+        # these are all constants
+        joints = device.joints
+        for x in joints:
+            if joints[x].get('devnr') == DevNr:
+                channr =  joints[x].get('channel')
+                if channr == 0:
+                    self.name0 = x
+                    self.P0 = joints[x].get('P')
+                    self.I0 = joints[x].get('I')
+                    self.D0 = joints[x].get('D')
+                    self.lower0 = joints[x].get('lower')
+                    self.upper0 = joints[x].get('upper')
+                    self.controller0 = joints[x].get('controller')
+                else:
+                    self.name1 = x
+                    self.P1 = joints[x].get('P')
+                    self.I1 = joints[x].get('I')
+                    self.D1 = joints[x].get('D')
+                    self.lower1 = joints[x].get('lower')
+                    self.upper1 = joints[x].get('upper')
+                    self.controller1 = joints[x].get('controller')
+                    self.inuse = joints[x].get('inuse')
+
+        # in URDF staat een zero waarde! gebruiken?
+        # de bij getEnc gevonden waarde gebruiken
+        self.prev_pos0   = 0     # previous position
+        self.prev_error0 = 0.0   # previous error
+        self.setpos0     = 0     # setpoint
+        self.int0        = 0     # I part of PID
+        self.max_speed0  = 2.1   # max speed. Only used in fake mode
+
+        self.prev_pos1   = 0     # previous position
+        self.prev_error1 = 0.0   # previous error
+        self.setpos1     = 0     # setpoint
+        self.int1        = 0     # I part of PID
+        self.max_speed1  = 2.1   # max speed. Only used in fake mode
+
+        self.last = rospy.Time.now()
+
+        # ROS interfaces
+        rospy.Subscriber(self.name0+'/position/command', Float64, self.command0Cb)
+        rospy.Subscriber(self.name1+'/position/command', Float64, self.command1Cb)
+
+        # trail run (first one is slow)
+        if not self.fake:
+            try:
+                rtm_usb_ReadStdMsg(DevNr)
+                rtm_usb_Read_ready(DevNr)
+                rtm_usb_SendStdMsg(DevNr,0, 0, 0, 0)
+            except MyError as e:
+                print 'Trail run exception occurred, value:', e.value
+
+            # Get the encoder offsets for encoder X and Y 
+            self.offset_1, self.offset_2, self.prev_pos0, self.prev_pos1 = getEncOffset_S3Gr(DevNr)
+            self.setpos0 = self.prev_pos0
+            self.setpos1 = self.prev_pos1
+        # for check
+        print '*Shoulder joint (roll)'
+        self.showParam(self.prev_pos0, self.offset_1 if not self.fake else 0,
+                       self.lower0,self.upper0, self.P0,self.I0,self.D0,self.controller0)
+        print '*Gripper'
+        self.showParam(self.prev_pos1, self.offset_2 if not self.fake else 0,
+                       self.lower1,self.upper1, self.P1,self.I1,self.D1,self.controller1)
+
+    def showParam(self, prev_pos,offset, lower,upper, P,I,D,contr):
+        print '    enc: (angle (rad), offset) = (%.4f, %.1f)' % (prev_pos, offset)
+        print '    joint range of motion: [%.2f, %.2f] (rad)' % (lower, upper)
+        print '    contr. param: (P, I, D,  contr) = (%.1f, %.1f, %.1f,  %s)' % (P, I, D, contr)
+
+    def shutdown(self):
+        if not self.fake:
+            rtm_usb_SendStdMsg(self.DevNr,0, 0, 0, 0);
+        return None
+
+    def saturator(self, val, lower, upper):
+        return lower if val<lower else upper if val>upper else val
+
+    def getPosition(self):
+        return [ (self.name0, self.prev_pos0), (self.name1, self.prev_pos1) ]
+
+    def setPosition0(self, pos0):
+        self.setpos0 = self.saturator(pos0, self.lower0,self.upper0)
+    def setPosition1(self, pos1):
+        self.setpos1 = self.saturator(pos1, self.lower1,self.upper1)
+
+    def command0Cb(self, req):
+        # set self.setpos0
+        if self.controller0 and self.controller0.active():
+            # Under and action control, do not interfere
+            return
+        elif self.setpos0 != req.data:     #or not self.active:
+            self.setPosition0(req.data)
+    def command1Cb(self, req):
+        # set self.setpos1
+        if self.controller1 and self.controller1.active():
+            # Under and action control, do not interfere 
+            return
+        elif self.setpos1 != req.data:     #or not self.active:
+            self.setPosition1(req.data)
+
+    def step(self, enc0, enc1):
+
+        if not self.fake:
+            # moet dit voor ieder board weer omnieuw?
+            now = rospy.Time.now()
+            # dt: elapsed time
+            dt = now - self.last
+            dt = dt.to_sec()
+            self.last = now
+
+            #  offset_1 via hall sensor, offset_2 using homeing to close position
+            EncTheta1 = enc0 + self.offset_1
+            EncTheta2 = enc1 + self.offset_2
+
+            # S3 controller
+            ################
+
+            #  Convert encoder to angle in degrees
+            EncTheta1 = EncTheta1 * (180/190400)
+
+            #  pos0 en pos1 in radians (later direct)
+            pos0 = EncTheta1*pi/180
+
+            error0 = self.setpos0 - pos0
+
+            self.int0 += error0*dt
+            dterm0 =  (error0 - self.prev_error0)/dt
+
+            vel0 = (pos0 - self.prev_pos0)/dt
+
+            self.prev_pos0 = pos0
+            self.prev_error0 = error0
+
+
+            # calculatie the tau's using PID for the moment
+            tau0 = self.P0*error0 + self.I0*self.int0 + self.D0*dterm0
+
+            # 
+            taumotor0 = tau0
+
+            # Motor specifications (for S3)         Shoulder  Elbow  Wrist
+            kM  = 53.8   # Torque Constant [nMn/A]:    53.8   23.2   21.2
+            G   = 66     # Gear Ratio             :    66     33     29  
+            eff =  0.70  # Max Eff of the Gear [%]:     0.70   0.75   0.70
+
+            # The calculated torque needs to be compensated for the efficiency of the gearing
+            torquem0 = taumotor0/(G*eff)
+
+            # The current in mA is related to the number of counts in the output
+            # I(A)=torque(mNm)/km(mNm/A). We need I(mA) and have torque(Nm), so
+            # I(mA)=torque(Nm)*1000*1000/km(mNm/A)
+            i0 = torquem0*1000*1000/kM/4.3
+            # No compensation for non-linear amplifier. See testwrist.py
+            u0 = i0*10
+            # Define a limit for the reference signal to protect the motors
+            u0_upper = 16000
+            u0 = self.saturator(u0, -u0_upper,u0_upper)
+
+
+            # Gripper controller 
+            ####################
+
+            #  Convert encoder to degrees
+            EncTheta2 = EncTheta2 * (6*10**-4)        # 1/1666
+
+            #print "EncTheta2: %.1f" % (EncTheta2)
+
+            #  pos0 en pos1 in radians (later direct)
+            pos1 = EncTheta2*pi/180
+
+            error1 = self.setpos1 - pos1
+
+            self.int1 += error1*dt
+            dterm1 =  (error1 - self.prev_error1)/dt
+
+            vel1 = (pos1 - self.prev_pos1)/dt
+
+            self.prev_pos1 = pos1
+            self.prev_error1 = error1
+
+            # calculatie the tau's using PID for the moment
+            tau1 = self.P1*error1 + self.I1*self.int1 + self.D1*dterm1
+
+            # een enkele motor
+            taumotor1 = tau1
+
+            # Motor specifications (for Gripper)    Shoulder  Elbow  Wrist
+            kM  = 25.9   # Torque Constant [nMn/A]:    53.8   23.2   21.2
+            G   = 66     # Gear Ratio             :    66     33     29  
+            eff =  0.70  # Max Eff of the Gear [%]:     0.70   0.75   0.70
+
+            # The calculated torque needs to be compensated for the efficiency of the gearing
+            torquem1 = taumotor1/(G*eff)
+
+            # The current in mA is related to the number of counts in the output
+            # I(A)=torque(mNm)/km(mNm/A). We need I(mA) and have torque(Nm), so
+            # I(mA)=torque(Nm)*1000*1000/km(mNm/A)
+            i1 = torquem1*1000*1000/kM/4.3
+            # No compensation for non-linear amplifier. see testwrist.py
+            u1 = 20*i1
+            # Define a limit for the reference signal to protect the motors
+            u1_upper = 28000
+            u1 = self.saturator(u1, -u1_upper,u1_upper)
+
+            if not self.inuse:
+                u1 = 0
+
+            # at which point should we put this? (waarschijnlijk in driver)
+            rtm_usb_Read_ready(self.DevNr)
+
+            return pos0, vel0, u0, pos1, vel1, u1
+
+        else:
+            # fake stuff
+            # bereken de nieuwe position en snelheid
+            # gebruik een max speed, voorlopig alleen in fake mode
+            t = rospy.Time.now()
+
+            # channel 0
+            # apply limits to position
+            cmd = self.setpos0 - self.prev_pos0
+            cmd_upper = self.max_speed0/self.rate
+            cmd = self.saturator(cmd, -cmd_upper,cmd_upper)
+            # new position
+            pos0 = self.prev_pos0 + cmd
+            # new speed
+            vel0 = (pos0 - self.prev_pos0)/((t - self.last).to_nsec()/1000000000.0)
+            self.prev_pos0 = pos0
+
+            # channel 1
+            # apply limits to position
+            cmd = self.setpos1 - self.prev_pos1
+            cmd_upper = self.max_speed1/self.rate
+            cmd = self.saturator(cmd, -cmd_upper,cmd_upper)
+            # new position
+            pos1 = self.prev_pos1 + cmd
+            # new speed
+            vel1 = (pos1 - self.prev_pos1)/((t - self.last).to_nsec()/1000000000.0)
+            self.prev_pos1 = pos1
+
+            self.last = t
+
+            return pos0, vel0, 0, pos1, vel1, 0
+
+
+class Wristcontroller(Board):
+    """
+       controller for wrist joints with differential drive
+                      (= wrist_{pitch,yaw}_joint)
+    """
+    def __init__(self, device, DevNr):
+        self.fake = device.fake
+        self.rate = device.rate
+        self.DevNr = DevNr
+
+        # parameters voor dit board ophalen
+        # these are all constants
+        joints = device.joints
+        for x in joints:
+            if joints[x].get('devnr') == DevNr:
+                channr =  joints[x].get('channel')
+                if channr == 0:
+                    self.name0 = x
+                    self.P0 = joints[x].get('P')
+                    self.I0 = joints[x].get('I')
+                    self.D0 = joints[x].get('D')
+                    self.lower0 = joints[x].get('lower')
+                    self.upper0 = joints[x].get('upper')
+                    self.maxvel0 =  0.354   #  3.54 [rad/s] in specification
+                    self.minvel0 = -0.354   # -3.54 [rad/s] in specification
+                    self.controller0 = joints[x].get('controller')
+                else:
+                    self.name1 = x
+                    self.P1 = joints[x].get('P')
+                    self.I1 = joints[x].get('I')
+                    self.D1 = joints[x].get('D')
+                    self.lower1 = joints[x].get('lower')
+                    self.upper1 = joints[x].get('upper')
+                    self.maxvel1 =  0.354   #  3.54 [rad/s] in specification
+                    self.minvel1 = -0.354   # -3.54 [rad/s] in specification
+                    self.controller1 = joints[x].get('controller')
+
+        # in URDF staat een zero waarde! gebruiken?
+        # de bij getEnc gevonden waarde gebruiken
+        self.setpos0     = 0      # setpoint for position
+        self.prev_pos0   = 0      # previous position
+        self.setvel0     = 0      # setpoint for velocity
+        self.est_pos0    = None   # estimated position for pseudo differentiator
+        self.int0        = 0      # I part of PID
+        self.max_speed0  = 2.1    # max speed. Only used in fake mode
+
+        self.setpos1     = 0      # setpoint for position
+        self.prev_pos1   = 0      # previous position
+        self.setvel1     = 0      # setpoint for velocity
+        self.est_pos1    = None   # estimated position for pseudo differentiator
+        self.int1        = 0      # I part of PID
+        self.max_speed1  = 2.1    # max speed. Only used in fake mode
+
+        self.cutoff_freq = 70     # cutoff frequency for pseudo differentiator
+        
+        # self.time = 0
+        self.last = rospy.Time.now()
+
+        # ROS interfaces
+        rospy.Subscriber(self.name0+'/position/command', Float64, self.poscmd0Cb)
+        rospy.Subscriber(self.name1+'/position/command', Float64, self.poscmd1Cb)
+#        rospy.Subscriber(self.name0+'/velocity/command', Float64, self.velcmd0Cb)
+#        rospy.Subscriber(self.name1+'/velocity/command', Float64, self.velcmd1Cb)
+
+        # We will get the image width and height from the camera_info topic
+        # self.image_width = 640
+        # self.image_height = 480
+        self.image_width = 0
+        self.image_height = 0
+        # Set flag to indicate when the ROI stops updating
+        self.target_visible = False
+        # Wait for the camera_info topic to become available
+        rospy.loginfo("Waiting for camera_info topic...")
+        rospy.wait_for_message('/camera/rgb/camera_info', CameraInfo)
+        # Subscribe the camera_info topic to get the image width and height
+        rospy.Subscriber('/camera/rgb/camera_info', CameraInfo,
+                         self.get_camera_info, queue_size=1)
+        # Wait until we actually have the camera data
+        while self.image_width == 0 or self.image_height == 0:
+            rospy.sleep(1)
+
+        # Get a lock for updating the values of the visual features
+        self.lock = thread.allocate_lock()
+
+        # We will get the centroid and width of the target object as the visual features from the roi topic
+        self.lambda_mu = 0
+        self.lambda_nu = 0
+        self.lambda_l  = 0
+        # the desired features
+        self.lambdad_mu = 0
+        self.lambdad_nu = 0
+        self.lambdad_l  = 100
+        # propotional gain
+        self.kf = 0.001
+        # Subscribe to the ROI topic
+        # and set the callback to update the robot's motion
+        rospy.Subscriber('roi', RegionOfInterest, self.convert2features, queue_size=1)
+        # Wait until we have an ROI to follow
+        rospy.loginfo("Waiting for messages on /roi...")
+        rospy.wait_for_message('roi', RegionOfInterest)
+        rospy.loginfo("ROI messages detected. Starting tracker...")
+
+        # trail run (first one is slow)
+        if not self.fake:
+            try:
+                rtm_usb_ReadStdMsg(DevNr)
+                rtm_usb_Read_ready(DevNr)
+                rtm_usb_SendStdMsg(DevNr,0, 0, 0, 0)
+            except MyError as e:
+                print 'Trail run exception occurred, value:', e.value
+
+            # Get the encoder offsets for encoder X and Y 
+            self.offset_1, self.offset_2, self.prev_pos0, self.prev_pos1 = getEncOffset_PwYw(DevNr)
+            self.setpos0 = self.prev_pos0
+            self.setpos1 = self.prev_pos1
+        # for check
+        print '*Wrist joint (pitch)'
+        self.showParam(self.prev_pos0, self.offset_1 if not self.fake else 0,
+                       self.lower0,self.upper0, self.P0,self.I0,self.D0,self.controller0)
+        print '*Wrist joint (yaw)'
+        self.showParam(self.prev_pos1, self.offset_2 if not self.fake else 0,
+                       self.lower1,self.upper1, self.P1,self.I1,self.D1,self.controller1)
+        print '------------------------------ init. info. (end) ------------------------------'
+
+    def showParam(self, prev_pos,offset, lower,upper, P,I,D,contr):
+        print '    enc: (angle (rad), offset) = (%.4f, %.1f)' % (prev_pos, offset)
+        print '    joint range of motion: [%.2f, %.2f] (rad)' % (lower, upper)
+        print '    contr. param: (P, I, D,  contr) = (%.1f, %.1f, %.1f,  %s)' % (P, I, D, contr)
+
+    def shutdown(self):
+        if not self.fake:
+            rtm_usb_SendStdMsg(self.DevNr,0, 0, 0, 0);
+        return None
+
+    def convert2features(self, msg):
+        # Acquire a lock while we're setting the robot speeds
+        self.lock.acquire()
+        
+        try:
+            # If the ROI has a width or height of 0, we have lost the target
+            if msg.width == 0 or msg.height == 0:
+                self.target_visible = False
+                return
+            # If the ROI stops updating this next statement will not happen
+            self.target_visible = True
+    
+            # Compute the displacement of the ROI from the center of the image
+            target_offset_x = (msg.x_offset + msg.width/2) - self.image_width/2
+            self.lambda_mu = (msg.x_offset + msg.width/2) - self.image_width/2
+            self.lambda_nu = -(msg.y_offset + msg.height/2) + self.image_height/2
+            self.lambda_l  = msg.height
+    
+        finally:
+            # Release the lock
+            self.lock.release()
+
+    def saturator(self, val, name, lower, upper):
+        # The most compact form is:
+        # return lower if val<lower else upper if val>upper else val
+        if val < lower:
+            print '[Warning] %s is saturated by the lower bound' % name
+            return lower
+        elif val > upper:
+            print '[Warning] %s is saturated by the upper bound' % name
+            return upper
+        else:
+            return val
+
+    def getPosition(self):
+        return [ (self.name0, self.prev_pos0), (self.name1, self.prev_pos1) ]
+
+    def setPosition0(self, pos):
+        self.setpos0 = self.saturator(pos, 'setpos0', self.lower0,self.upper0)
+    def setPosition1(self, pos):
+        self.setpos1 = self.saturator(pos, 'setpos1', self.lower1,self.upper1)
+    def setVelocity0(self, vel):
+        self.setvel0 = self.saturator(vel, 'setvel0', self.minvel0,self.maxvel0)
+    def setVelocity1(self, vel):
+        self.setvel1 = self.saturator(vel, 'setvel1', self.minvel1,self.maxvel1)
+
+    def poscmd0Cb(self, req):
+        # set self.setpos0
+        if self.controller0 and self.controller0.active():
+            # Under and action control, do not interfere
+            return
+        elif self.setpos0 != req.data:     #or not self.active:
+            self.setPosition0(req.data)
+    def poscmd1Cb(self, req):
+        # set self.setpos1
+        if self.controller1 and self.controller1.active():
+            # Under and action control, do not interfere 
+            return
+        elif self.setpos1 != req.data:     #or not self.active:
+            self.setPosition1(req.data)
+    def velcmd0Cb(self, req):
+        # set self.setvel0
+        if self.controller0 and self.controller0.active():
+            # Under and action control, do not interfere
+            return
+        elif self.setvel0 != req.data:     #or not self.active:
+            self.setVelocity0(req.data)
+    def velcmd1Cb(self, req):
+        # set self.setvel1
+        if self.controller1 and self.controller1.active():
+            # Under and action control, do not interfere 
+            return
+        elif self.setvel1 != req.data:     #or not self.active:
+            self.setVelocity1(req.data)
+
+    def get_camera_info(self, msg):
+        self.image_width = msg.width
+        self.image_height = msg.height
+
+    def step(self, enc0, enc1):
+        t = rospy.Time.now()
+        # dt: elapsed time
+        dt = (t - self.last).to_sec()
+        self.last = t
+        
+#         print '*** for debug: (mu, nu, w) = (%.1f, %.1f, %.1f)' % (self.lambda_mu,self.lambda_nu,self.lambda_l)
+#         print '    (thd_wp, thd_wy, thdotd_wp, thdotd_wy) = (%.3f, %.3f, %.3f, %.3f) ***' % (self.setpos0,self.setpos1,self.setvel0,self.setvel1)
+#         print '*** image size:', self.image_width, self.image_height, ' ***'
+
+        ### for experimental case (sim:=false)
+        if not self.fake:
+            # the values of Hall effect sensors compensate the offsets of (enc0, enc1)
+            (EncWX, EncWY) = (enc0 + self.offset_1, enc1 + self.offset_2)
+            # convert to the values wrt joints in view of the differential drive
+            (EncTheta0, EncTheta1) = (0.5*(EncWX + EncWY), 0.5*(EncWY - EncWX))
+            # convert to angles in degrees (board specific)
+            EncTheta0 = EncTheta0*( 2.43049633e-3)
+            EncTheta1 = EncTheta1*(-2.71964947e-3)
+            # convert to angles in radians (later direct)
+            (pos0, pos1) = (EncTheta0*pi/180, EncTheta1*pi/180)
+
+            ### approx. differentiator case
+#             vel0 = (pos0 - self.prev_pos0)/dt
+#             vel1 = (pos1 - self.prev_pos1)/dt
+#             self.prev_pos0 = pos0
+#             self.prev_pos1 = pos1
+            ### pseudo differentiator case
+            self.est_pos0 = pos0 if self.est_pos0==None else self.est_pos0
+            self.est_pos1 = pos1 if self.est_pos1==None else self.est_pos1
+            vel0 = self.cutoff_freq*(pos0 - self.est_pos0)
+            self.est_pos0 += vel0*dt
+            vel1 = self.cutoff_freq*(pos1 - self.est_pos1)
+            self.est_pos1 += vel1*dt
+
+            # visual feedback for setvel0 (joint velocity of wrist pitch)
+            self.setvel0 = self.kf*(self.lambdad_nu - self.lambda_nu)
+            self.setvel0 = -self.setvel0   # to fit the positive direction 
+            self.setvel0 = self.saturator(self.setvel0, 'setvel0',
+                                          self.minvel0,self.maxvel0)
+            # visual feedback for setvel1 (joint velocity of wrist yaw)
+            self.setvel1 = self.kf*(self.lambdad_mu - self.lambda_mu)
+#             self.setvel1 = -self.setvel1   # to fit the positive direction 
+            self.setvel1 = self.saturator(self.setvel1, 'setvel1',
+                                          self.minvel1,self.maxvel1)
+
+            (perr0, perr1) = (self.setpos0 - pos0, self.setpos1 - pos1)
+            (verr0, verr1) = (self.setvel0 - vel0, self.setvel1 - vel1)
+            
+            # calculate the joint torques based velocity-based PID controller
+            tau0 = self.P0*perr0 + self.I0*self.int0 + self.D0*verr0
+            tau1 = self.P1*perr1 + self.I1*self.int1 + self.D1*verr1
+
+            # update (int0, int1) and (setpos0, setpos1) for next loop
+            self.int0 += perr0*dt
+            self.int1 += perr1*dt
+            self.setpos0 += self.setvel0*dt
+            self.setpos0 = self.saturator(self.setpos0, 'setpos0',
+                                          0.75*self.lower0,0.75*self.upper0)
+            self.setpos1 += self.setvel1*dt
+            self.setpos1 = self.saturator(self.setpos1, 'setpos1',
+                                          0.75*self.lower1,0.75*self.upper1)
+
+            # convert back to the 2 motors (ik snap de factor 2 niet!)
+            taumotor0 = 0.5*(tau0 + tau1)
+            taumotor1 = 0.5*(tau0 - tau1)
+
+            # Motor specifications (for Wrist)      Shoulder  Elbow  Wrist
+            kM  = 21.2   # Torque Constant [nMn/A]:    53.8   23.2   21.2
+            G   = 29     # Gear Ratio             :    66     33     29  
+            eff =  0.70  # Max Eff of the Gear [%]:     0.70   0.75   0.70
+
+            # The calculated torque needs to be compensated for the efficiency of the gearing
+            (torquem0, torquem1) = (taumotor0/(G*eff), taumotor1/(G*eff))
+
+            # The current in mA is related to the number of counts in the output
+            # I(A)=torque(mNm)/kM(mNm/A).  To caluculate I(mA) by using torque(Nm),
+            # I(mA)=1000*(1000*torque(Nm))/kM(mNm/A)
+            (i0, i1) = (1000*1000*torquem0/kM/4.3, 1000*1000*torquem1/kM/4.3)
+            # no compensation for non-linear amplifier. See testwrist.py
+            (u0, u1) = (50*i0, 50*i1)
+            # Define a limit for the reference signal to protect the motors
+            u0_upper = 16000
+            u0 = self.saturator(u0, 'u0', -u0_upper,u0_upper)
+            u1_upper = 16000
+            u1 = self.saturator(u1, 'u1', -u1_upper,u1_upper)
+
+            # at which point should we put this? (waarschijnlijk in driver)
+            rtm_usb_Read_ready(self.DevNr)
+
+            return pos0, vel0, u0, pos1, vel1, u1
+
+        ### for simulation case (sim:=true)
+        # Calculate the new positions and velocities along their commands
+        else:
+            ### for wrist pitch joint with soft limits ###
+            #--- visual servoing ---
+            self.setvel0 = self.kf*(self.lambdad_nu - self.lambda_nu)
+            self.setvel0 = -self.setvel0   # to fit the positive direction 
+            self.setvel0 = self.saturator(self.setvel0, 'setvel0',
+                                          self.minvel0,self.maxvel0)
+            vel0 = self.setvel0
+            self.setpos0 += self.setvel0*dt
+            self.setpos0 = self.saturator(self.setpos0, 'setpos0',
+                                          0.75*self.lower0,0.75*self.upper0)
+            pos0 = self.setpos0
+            #--- position-based kinematics ---
+#             cmd = self.setpos0 - self.prev_pos0
+#             cmd_upper = self.max_speed0/self.rate
+#             cmd = self.saturator(cmd, 'cmd for pos0', -cmd_upper,cmd_upper)
+#             # new position
+#             pos0 = self.prev_pos0 + cmd
+#             # new speed
+#             vel0 = (pos0 - self.prev_pos0)/dt
+#             self.prev_pos0 = pos0
+
+            # for wrist yaw joint with soft limits
+            #--- visual servoing ---
+            self.setvel1 = self.kf*(self.lambdad_mu - self.lambda_mu)
+#             self.setvel1 = -self.setvel1   # to fit the positive direction 
+            self.setvel1 = self.saturator(self.setvel1, 'setvel1',
+                                          self.minvel1,self.maxvel1)
+            vel1 = self.setvel1
+            self.setpos1 += self.setvel1*dt
+            self.setpos1 = self.saturator(self.setpos1, 'setpos1',
+                                          0.75*self.lower1,0.75*self.upper1)
+            pos1 = self.setpos1
+            #--- for position-based kinematics ---
+#             cmd = self.setpos1 - self.prev_pos1
+#             cmd_upper = self.max_speed1/self.rate
+#             # print '(cmd, cmd_upper) = (%.3f, %.3f)' % (cmd, cmd_upper)
+#             cmd = self.saturator(cmd, 'cmd for pos1', -cmd_upper,cmd_upper)
+#             # new position
+#             pos1 = self.prev_pos1 + cmd
+#             # new speed
+#             vel1 = (pos1 - self.prev_pos1)/dt
+#             self.prev_pos1 = pos1
+
+            return pos0, vel0, 0, pos1, vel1, 0
